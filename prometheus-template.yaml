@@ -1,0 +1,810 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: prometheus
+  annotations:
+    "openshift.io/display-name": Prometheus
+    description: |
+      A monitoring solution for an OpenShift cluster - collect and gather metrics and alerts from nodes, services, and the infrastructure. This is a tech preview feature.
+    iconClass: fa fa-cogs
+    tags: "monitoring, prometheus, time-series"
+
+parameters:
+  - name: APP_NAME
+    description: "Value for app label."
+
+  - name: NAME_SPACE
+    description: "The name of the namespace (Openshift project)"
+
+objects:
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: prometheus
+  rules:
+    - apiGroups:
+      - ''
+      resources:
+        - services
+        - endpoints
+        - pods
+      verbs:
+        - get
+        - list
+        - watch
+
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: prometheus
+  roleRef:
+    name: prometheus
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+  subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+
+# Create a fully end-to-end TLS connection to the prometheus proxy
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  spec:
+    port:
+      targetPort: prometheus
+    to:
+      kind: Service
+      name: prometheus
+      weight: 100
+    tls:
+      termination: edge
+    wildcardPolicy: None
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/scheme: https
+    labels:
+      name: prometheus
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: prometheus
+      port: 9090
+      protocol: TCP
+      targetPort: prometheus-port
+    selector:
+      app: prometheus
+
+- apiVersion: apps/v1beta1
+  kind: StatefulSet
+  metadata:
+    labels:
+      app: prometheus
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  spec:
+    updateStrategy:
+      type: RollingUpdate
+    podManagementPolicy: Parallel
+    selector:
+      matchLabels:
+        app: prometheus
+    template:
+      metadata:
+        labels:
+          app: prometheus
+        name: prometheus
+      spec:
+        serviceAccountName: prometheus
+        containers:
+
+        - name: prometheus
+          args:
+            - --storage.tsdb.retention=30d
+            - --storage.tsdb.min-block-duration=2m
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --web.enable-lifecycle
+            - --web.external-url=https://prometheus-demo-app.org.com
+          image: prom/prometheus:v2.23.0
+          imagePullPolicy: IfNotPresent
+          ports:
+          - name: prometheus-port
+            containerPort: 9090
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /-/healthy
+              port: prometheus-port
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /-/ready
+              port: prometheus-port
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          volumeMounts:
+          - mountPath: /etc/prometheus
+            name: prometheus-config
+          - mountPath: /prometheus
+            name: prometheus-data
+
+        - name: configmap-reload
+          image:  jimmidyson/configmap-reload:v0.4.0
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - --volume-dir=/etc/prometheus
+            - --webhook-url=http://localhost:9090/-/reload
+          volumeMounts:
+          - name: prometheus-config
+            mountPath: /etc/prometheus
+            readOnly: true
+        restartPolicy: Always
+
+        volumes:
+          - name: prometheus-config
+            configMap:
+              defaultMode: 420
+              name: prometheus
+
+    volumeClaimTemplates:
+    - metadata:
+        name: prometheus-data
+      spec:
+        accessModes: [ "ReadWriteMany" ]
+        resources:
+          requests:
+            storage: 15Gi
+
+
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  data:
+    alerting.rules: |
+      # Alerting rules
+      #
+      # Required labels:
+      #   alertname
+      #   severity    (critical, warning, information)
+      #   service     (prometheus, okd, rabbit, redis, kafka, application)
+      #   scope       (monitoring, infrastructure, messaging, db)
+      # Optional Labels:
+      #   target      (downstream)
+      #   environment (stage, production)
+
+      groups:
+      - name: Prometheus
+        interval: 30s # defaults to global interval
+        rules:
+        - alert: PrometheusJobMissing
+          expr: absent(up{job="prometheus"})
+          for: 5m
+          labels:
+            severity: critical
+            service: prometheus
+            scope: monitoring
+          annotations:
+            summary: Prometheus job missing (instance {{ $labels.instance }})
+            description: A Prometheus job has disappeared
+
+        - alert: PrometheusAllTargetsMissing
+          expr: count (up) by (job) == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: prometheus
+            scope: monitoring
+          annotations:
+            summary: Prometheus all targets missing (instance {{ $labels.instance }})
+            description: A Prometheus job does not have living target anymore.
+
+        - alert: PrometheusConfigurationReloadFailure
+          expr: prometheus_config_last_reload_successful != 1
+          for: 5m
+          labels:
+            severity: warning
+            service: prometheus
+            scope: monitoring
+          annotations:
+            summary: Prometheus configuration reload failure (instance {{ $labels.instance }})
+            description: Prometheus configuration reload error
+
+      - name: Applications
+        interval: 30s # defaults to global interval
+        rules:
+        - alert: JvmOutOfMemory
+          expr: jvm_memory_used_bytes / jvm_memory_max_bytes  * 100  > 90
+          for: 5m
+          labels:
+            severity: warning
+            service: okd
+            scope: infrastructure
+          annotations:
+            title: JVM out of memory
+            description: JVM is running out of memory (> 90%)
+
+        - alert: ProcessCpuUsage
+          expr: process_cpu_usage * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+            service: okd
+            scope: infrastructure
+          annotations:
+            summary: "Process CPU for {{ $labels.job }} is above 80%"
+        
+        - alert: FailedHttpRequestsFromApplication
+          expr: sum by (kubernetes_pod_name, clientName, method, uri, status, outcome) (rate(http_client_requests_seconds_count{status!~"^[2-3][0-9][0-9]$"}[5m]))
+          for: 5m
+          labels:
+            severity: warning
+            service: application
+            scope: infrastructure
+            target: downstream
+          annotations:
+            summary: HTTP Requests failed for Host = {{ $labels.clientName }}
+
+        - alert: FailedHttpRequestsToActuator
+          expr: sum by (kubernetes_pod_name, clientName, method, uri, status, outcome)(rate(http_server_requests_seconds_count{uri=~".*actuator.*", status!~"^[2-3][0-9][0-9]$"}[5m]))
+          for: 5m
+          labels:
+            severity: warning
+            service: application
+            scope: infrastructure
+          annotations:
+            summary: HTTP Requests failed from Host = {{ $labels.clientName }}
+
+        - alert: FailedHttpRequestsToApplication
+          expr: sum by (kubernetes_pod_name, clientName, method, uri, status, outcome)(rate(http_server_requests_seconds_count{uri!~".*actuator.*", status!~"^[2-3][0-9][0-9]$"}[5m]))
+          labels:
+            severity: warning
+            service: application
+            scope: infrastructure
+          annotations:
+            summary: HTTP Requests failed from Host = {{ $labels.clientName }}
+
+        - alert: TooManyRestarts
+          expr: changes(process_start_time_seconds [15m]) > 2
+          for: 5m
+          labels:
+            severity: warning
+            service: application
+            scope: monitoring
+          annotations:
+            summary: Application too many restarts (instance {{ $labels.instance }})
+            description: Application has restarted more than twice in the last 15 minutes. It might be crash looping.
+
+      - name: Rabbit MQ
+        interval: 30s # defaults to global interval
+        rules:
+        - alert: RabbitmqNodeDown
+          expr: sum(rabbitmq_build_info) < 3
+          for: 5m
+          labels:
+            severity: critical
+            service: rabbit
+            scope: messaging
+          annotations:
+            title: Rabbitmq node down for instance {{ $labels.instance }}
+            description: Less than 3 nodes running in RabbitMQ cluster
+
+        - alert: RabbitmqNodeNotDistributed
+          expr: erlang_vm_dist_node_state < 3
+          for: 5m
+          labels:
+            severity: critical
+            service: rabbit
+            scope: messaging
+          annotations:
+            title: Rabbitmq node not distributed for instance {{ $labels.instance }}
+            description: Distribution link state is not 'up'
+
+        - alert: RabbitmqInstancesDifferentVersions
+          expr: count(count(rabbitmq_build_info) by (rabbitmq_version)) > 1
+          for: 5m
+          labels:
+            severity: warning
+            service: rabbit
+            scope: messaging
+          annotations:
+            title: Rabbitmq instances different versions for instance {{ $labels.instance }}
+            description: Running different version of Rabbitmq in the same cluster, can lead to failure.
+
+        - alert: RabbitmqMemoryHigh
+          expr: rabbitmq_process_resident_memory_bytes / rabbitmq_resident_memory_limit_bytes * 100 > 90
+          for: 5m
+          labels:
+            severity: warning
+            service: rabbit
+            scope: infrastructure
+          annotations:
+            title: Rabbitmq memory high for instance {{ $labels.instance }}
+            description: A node use more than 90% of allocated RAM
+
+        - alert: RabbitmqFileDescriptorsUsage
+          expr: rabbitmq_process_open_fds / rabbitmq_process_max_fds * 100 > 90
+          for: 5m
+          labels:
+            severity: warning
+            service: rabbit
+            scope: infrastructure
+          annotations:
+            title: Rabbitmq file descriptors usage for instance {{ $labels.instance }}
+            description: A node use more than 90% of file descriptors
+
+        - alert: RabbitmqTooMuchUnack
+          expr: sum(rabbitmq_queue_messages_unacked) BY (queue) > 1000
+          for: 5m
+          labels:
+            severity: warning
+            service: rabbit
+            scope: messaging
+          annotations:
+            title: Rabbitmq too much unack for instance {{ $labels.instance }}
+            description: Too much unacknowledged messages
+
+        - alert: RabbitmqTooMuchConnections
+          expr: rabbitmq_connections > 1000
+          for: 5m
+          labels:
+            severity: warning
+            service: rabbit
+            scope: messaging
+          annotations:
+            title:  Rabbitmq too much connections for instance {{ $labels.instance }}
+            description: The total connections of a node is too high
+
+        - alert: RabbitmqNoQueueConsumer
+          expr: rabbitmq_queue_consumers < 1
+          for: 5m
+          labels:
+            severity: information
+            service: rabbit
+            scope: messaging
+          annotations:
+            title:  Rabbitmq no queue consumer for instance {{ $labels.instance }}
+            description: A queue has less than 1 consumer
+
+        - alert: RabbitmqUnroutableMessages
+          expr: increase(rabbitmq_channel_messages_unroutable_returned_total[5m]) > 0 or increase(rabbitmq_channel_messages_unroutable_dropped_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: rabbit
+            scope: messaging
+          annotations:
+            title:  Rabbitmq unroutable messages for instance {{ $labels.instance }}
+            description: A queue has unroutable messages
+
+      - name: Kubernetes PODs Down
+        interval: 30s # defaults to global interval
+        rules:
+        - alert: PodDown
+          expr: up{job="kubernetes-pods"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            service: okd
+            scope: infrastructure
+          annotations:
+            title: "{{$labels.kubernetes_pod_name}} is down on {{$labels.kubernetes_namespace}}"
+
+      - name: Redis
+        interval: 30s # defaults to global interval
+        rules:
+        - alert: RedisInstanceDown
+          expr: redis_up == 0
+          for: 1m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis instance is down
+            description: Redis is down at {{ $labels.instance }} for 1 minute.
+          
+        - alert: RedisClusterDown
+          expr: min(redis_cluster_state) == 0
+          for: 1m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis cluster is down
+            description: Redis cluster is down at {{ $labels.instance }} for 1 minute.
+
+        - alert: RedisMissingMaster
+          expr: ( count (redis_instance_info{role="master"} ) by (role) ) < 3
+          for: 1m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis missing master 
+            description: Redis cluster has less than 3 masters
+
+        - alert: RedisTooManyMasters
+          expr: count (redis_instance_info{role="master"} ) by (role) > 3
+          for: 1m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis too many masters at instance {{ $labels.instance }}
+            description: Redis cluster has too many nodes marked as master
+
+        - alert: RedisDisconnectedSlaves
+          expr: ( sum without (instance, statefulset_kubernetes_io_pod_name, controller_revision_hash, kubernetes_pod_name) (redis_connected_slaves) ) > 3
+          for: 1m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis disconnected slaves for instance {{ $labels.instance }}
+            description:  Redis not replicating for all slaves. Consider reviewing the redis replication status.
+
+        - alert: RedisReplicationBroken
+          expr: delta(redis_connected_slaves[10m])  < 0
+          for: 10m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis replication broken for instance {{ $labels.instance }}
+            description: Redis instance lost a slave
+
+        - alert: RedisClusterFlapping
+          expr: ( changes(redis_connected_slaves[10m]) > 2 ) < 0
+          for: 10m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis cluster flapping
+            description: Changes have been detected in Redis replica connection. This can occur when replica nodes lose connection to the master and reconnect (a.k.a flapping).
+
+        # - alert: RedisMissingBackup
+        #   expr: time() - redis_rdb_last_save_timestamp_seconds > 60 * 60 * 24
+        #   for: 10m
+        #   labels:
+        #     severity: critical
+        #   annotations:
+        #     title: Redis missing backup for instance {{ $labels.instance }}
+        #     description: Redis has not been backuped for 24 hours
+
+        - alert: RedisOutOfMemory
+          expr: ( redis_memory_used_bytes / redis_memory_max_bytes  * 100 ) > 90
+          for: 5m
+          labels:
+            severity: warning
+            service: redis
+            scope: db
+          annotations:
+            title: Redis out of memory at instance {{ $labels.instance }}
+            description: Redis is running out of memory (> 90%)
+
+        - alert: RedisNotEnoughConnections
+          expr: redis_connected_clients < 3
+          for: 5m
+          labels:
+            severity: information
+            service: redis
+            scope: db
+          annotations:
+            title: Redis not enough connections
+            description: Redis instance should have more connections (> 5)
+
+        - alert: RedisTooManyConnections
+          expr: redis_connected_clients > 100
+          for: 5m
+          labels:
+            severity: warning
+            service: redis
+            scope: db
+          annotations:
+            title: Redis too many connections at instance {{ $labels.instance }}
+            description: Redis instance has too many connections
+
+        - alert: RedisRejectedConnections
+          expr: increase(redis_rejected_connections_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            service: redis
+            scope: db
+          annotations:
+            title: Redis rejected connections at instance {{ $labels.instance }}
+            description: Some connections to Redis has been rejected
+
+      - name: Kafka
+        interval: 30s # defaults to global interval
+        rules:
+
+        - alert: KafkaLagStage
+          expr:  sum(kafka_consumergroup_lag{consumergroup=~"consumer-group-s.+"}) by (consumergroup, topic) > 100
+          for: 5m
+          labels:
+            severity: warning
+            service: kafka
+            scope: messaging
+            environment: stage
+          annotations:
+            title: Kafka Consumer Lag in Stage
+            description: There is a huge lag =  {{ $value }} for topic = {{ $labels.topic }}  and consumer group = {{ $labels.consumergroup }}
+
+        - alert: KafkaLagProd
+          expr:  sum(kafka_consumergroup_lag{consumergroup=~"consumer-group-p.+"}) by (consumergroup, topic) > 100
+          for: 5m
+          labels:
+            severity: critical
+            service: kafka
+            scope: messaging
+            environment: production
+          annotations:
+            title: Kafka Consumer Lag in Production 
+            description: There is a huge lag =  {{ $value }} for topic = {{ $labels.topic }}  and consumer group = {{ $labels.consumergroup }}
+
+        - alert: Kafka Topics Replicas
+          expr: sum(kafka_topic_partition_in_sync_replica) by (topic) < 3
+          for: 5m
+          labels:
+            severity: critical
+            service: kafka
+            scope: messaging
+          annotations:
+            summary: Kafka topics replicas less than 3
+            description: Kafka topics replicas is  {{ $value }} for topic = {{ $labels.topic }}  and consumer group = {{ $labels.consumergroup }}
+
+      - name: Exporters
+        interval: 30s # defaults to global interval
+        rules:
+        - alert: KafkaExporter
+          expr: up{instance=~"kafka-.+", job="kafka-prod"} == 0
+          for: 3m
+          labels:
+            severity: warning
+            service: kafka
+            scope: infrastructure
+          annotations:
+            title: Kafka Exporter is Down
+            description: Kafka Exporter is down on {{ $labels.instance }}. Could not scrape kafka-exporter for 3m.
+
+        - alert: BlackboxProbeFailed
+          expr: probe_success == 0
+          for: 5m
+          labels:
+            severity: warning
+            service: prometheus
+            scope: infrastructure
+          annotations:
+            title: Blackbox probe failed for instance {{ $labels.instance }}
+
+        - alert: BlackboxSlowProbe
+          expr: avg_over_time(probe_duration_seconds[1m]) > 1
+          for: 5m
+          labels:
+            severity: warning
+            service: prometheus
+            scope: infrastructure
+          annotations:
+            title: Blackbox slow probe for instance {{ $labels.instance }}
+            description: Blackbox probe took more than 1s to complete
+
+        - alert: BlackboxProbeHttpFailure
+          expr: probe_http_status_code <= 199 OR probe_http_status_code >= 400
+          for: 5m
+          labels:
+            severity: warning
+            service: application
+            scope: messaging
+            target: downstream
+          annotations:
+            title: Blackbox probe HTTP failure instance {{ $labels.instance }}
+            description: HTTP status code is not 200-399
+  
+        - alert: BlackboxSslCertificateWillExpireSoon
+          expr: probe_ssl_earliest_cert_expiry - time() < 86400 * 30
+          for: 5m
+          labels:
+            severity: critical
+            service: application
+            scope: infrastructure
+          annotations:
+            title: Blackbox SSL certificate will expire soon for instance {{ $labels.instance }}
+            description: SSL certificate expires in 30 days
+
+        - alert: BlackboxSslCertificateExpired
+          expr: probe_ssl_earliest_cert_expiry - time() <= 0
+          for: 5m
+          labels:
+            severity: critical
+            service: application
+            scope: infrastructure
+          annotations:
+            title: Blackbox SSL certificate expired for instance {{ $labels.instance }}
+            description: SSL certificate has expired already
+
+        - alert: BlackboxProbeSlowHttp
+          expr: avg_over_time(probe_http_duration_seconds[1m]) > 1
+          for: 5m
+          labels:
+            severity: warning
+            service: prometheus
+            scope: monitoring
+          annotations:
+            title: Blackbox probe slow HTTP for instance {{ $labels.instance }}
+            description: HTTP request took more than 1s
+
+    recording.rules: |
+      groups:
+      - name: aggregate_container_resources
+        rules:
+        - record: container_cpu_usage_rate
+          expr: sum without (cpu) (rate(container_cpu_usage_seconds_total[5m]))
+        - record: container_memory_rss_by_type
+          expr: container_memory_rss{id=~"/|/system.slice|/kubepods.slice"} > 0
+        - record: container_cpu_usage_percent_by_host
+          expr: sum(rate(container_cpu_usage_seconds_total{id="/"}[5m])) BY(kubernetes_io_hostname) / ON(kubernetes_io_hostname) machine_cpu_cores
+        - record: apiserver_request_count_rate_by_resources
+          expr: sum without (client,instance,contentType) (rate(apiserver_request_count[5m]))
+    prometheus.yml: |
+      rule_files:
+        - '*.rules'
+      scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']  
+      - job_name: 'alertmanager'
+        scheme: https
+        static_configs:
+          - targets: ['app-alertmanager.org.com']
+        tls_config:
+          ca_file: /etc/prometheus/ca.crt
+          #cert_file: /etc/etcd/ssl/client.pem
+          #key_file: /etc/etcd/ssl/client-key.pem          
+          insecure_skip_verify: false
+      - job_name: 'grafana'
+        scheme: https
+        static_configs:
+          - targets: ['grafana-app.org.com']
+        tls_config:
+          ca_file: /etc/prometheus/ca.crt       
+          insecure_skip_verify: false
+      # Example scrape config for pods
+      #
+      # The relabeling allows the actual pod scrape endpoint to be configured via the
+      # following annotations:
+      #
+      # * `prometheus.io/scrape`: Only scrape pods that have a value of `true`
+      # * `prometheus.io/path`: If the metrics path is not `/metrics` override this. This will be the same for every container in the pod that is scraped.
+      # * this will scrape every container in a pod with `prometheus.io/scrape` set to true and the port is name `metrics` in the container
+      # * note `prometheus.io/port` is no longer honored. You must name the port(s) to scrape `metrics`
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - ${NAME_SPACE}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            action: keep
+            regex: metrics(-.*)?
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [ __address__, __meta_kubernetes_pod_container_port_number]
+            action: replace
+            regex: (.+):(?:\d+);(\d+)
+            replacement: ${1}:${2}
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: kubernetes_pod_name
+      #- job_name: 'rmq-app-prod'
+      #  scrape_interval: 5s
+      #  static_configs:
+      #    - targets: ['rmq-metrics-demo-project.org.com:80']
+      - job_name: 'kafka-prod'
+        scrape_interval: 5s
+        static_configs:
+          - targets: ['kafka-exporter-demo-project.org.com']
+        scheme: https
+        tls_config:
+          ca_file: /etc/prometheus/ca.crt
+      - job_name: 'ldap_check'
+        scrape_interval: 5m
+        metrics_path: /probe
+        params:
+          module: [tcp_connect]
+        static_configs:
+          - targets:
+            - 'ad-ldap-prod.uhc.com:389'
+        tls_config:
+          ca_file: /etc/prometheus/ca.crt
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+          - source_labels: [__param_target]
+            target_label: instance
+          - target_label: __address__
+            replacement: blackbox-exporter-demo-project.org.com  # The blackbox exporter's real hostname:port.
+          - target_label: __scheme__
+            replacement: https
+      - job_name: 'dependent_apps'
+        metrics_path: /probe
+        scrape_interval: 1m
+        params:
+          module: [http_org_ca_2xx]  # Look for a HTTP 200 response.
+        static_configs:
+          - targets:
+            - https://dependent-app1.org.com
+            - https://dependent-app2.org.com
+        tls_config:
+          ca_file: /etc/prometheus/ca.crt
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+          - source_labels: [__param_target]
+            target_label: instance
+          - target_label: __address__
+            replacement: blackbox-exporter-demo-project.org.com  # The blackbox exporter's real hostname:port.
+          - target_label: __scheme__
+            replacement: https
+
+      alerting:
+        alertmanagers:
+        - scheme: https
+          static_configs:
+            - targets:
+              - "app-alertmanager.org.com"
+          tls_config:
+            ca_file: /etc/prometheus/ca.crt
+
+    ca.crt: |
+      -----BEGIN CERTIFICATE-----
+      CA Certficate 1
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      CA Certficate 2
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      CA Certficate 3
+      -----END CERTIFICATE-----

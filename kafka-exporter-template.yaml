@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: kafka-exporter
+  annotations:
+    "openshift.io/display-name": kafka-exporter
+    description: |
+      Kafka prometheus exporter
+    iconClass: fa fa-cogs
+    tags: "monitoring, prometheus, kafka-exporter"
+
+parameters:
+  - name: APP_NAME
+    description: "Value for app label."
+
+  - name: NAME_SPACE
+    description: "The name of the namespace (Openshift project)"
+
+  - name: KAFKA_BROKER
+    value: kaas-broker.org.com:443  # CHANGE THIS
+
+  - name: TLS_SECRET_NAME
+    value: tls-secrets
+
+  - name: CA_FILE
+    value: tls-root-ca.cert
+
+  - name: CERT_FILE
+    value: tls-cert.pem
+
+  - name: KEY_FILE
+    value: tls-key.pem
+
+objects:
+
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    name: ${APP_NAME}
+    labels:
+      app: ${APP_NAME}
+  spec:
+    replicas: 1
+    selector:
+      deploymentconfig: ${APP_NAME}
+      app: ${APP_NAME}
+    template:
+      metadata:
+        labels:
+          deploymentconfig: ${APP_NAME}
+          app: ${APP_NAME}
+      spec:
+        containers:
+          - name: ${APP_NAME}
+            image: danielqsj/kafka-exporter:latest
+            ports:
+              - name: kexporter
+                containerPort: 9308
+                protocol: TCP
+            args:
+              - '--kafka.server=${KAFKA_BROKER}'
+              - '--kafka.version=2.0.0'
+              - '--tls.enabled'
+              - '--no-sasl.handshake'
+              - '--tls.ca-file=/etc/secrets/tls-root-ca.cert'
+              - '--tls.cert-file=/etc/secrets/tls-cert.pem'
+              - '--tls.key-file=/etc/secrets/tls-key.pem'
+            imagePullPolicy: Always
+            livenessProbe:
+              tcpSocket:
+                port: kexporter # named port
+              initialDelaySeconds: 10
+              timeoutSeconds: 2
+              periodSeconds: 5
+              failureThreshold: 5
+              successThreshold: 1
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: kexporter
+              initialDelaySeconds: 5
+              timeoutSeconds: 2
+              periodSeconds: 5
+            volumeMounts:
+            - name: tls-secrets
+              mountPath: /etc/secrets
+              readOnly: true
+        volumes:
+          - name: tls-secrets
+            secret:
+              secretName: ${TLS_SECRET_NAME}
+              items:
+                - key: tls-root-ca.cert
+                  path: ${CA_FILE}
+                - key: tls-cert.pem
+                  path: ${CERT_FILE}
+                - key: tls-key.pem
+                  path: ${KEY_FILE}
+    triggers:
+      - type: ConfigChange
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      name: ${APP_NAME}
+    name: ${APP_NAME}
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: kexporter
+      port: 9308
+      protocol: TCP
+      targetPort: kexporter
+    selector:
+      app: ${APP_NAME}
+    sessionAffinity: None
+    type: ClusterIP
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: ${APP_NAME}
+    namespace: "${NAME_SPACE}"
+  spec:
+    port:
+      targetPort: kexporter
+    to:
+      kind: Service
+      name: ${APP_NAME}
+      weight: 100
+    tls:
+      termination: edge
+    wildcardPolicy: None

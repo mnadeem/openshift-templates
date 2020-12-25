@@ -1,0 +1,355 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: rabbitmq-cluster
+  annotations:
+    description: "Deploys a RabbitMQ cluster"
+    iconClass: icon-rabbitmq
+    tags: rabbitmq,mq,messaging
+
+parameters:
+- name: NAMESPACE
+  description: "openshift namespace where cluster is deployed"
+- name: CLUSTER_NAME
+  description: "Name of the RabbitMQ cluster"
+  value: rabbitmq-cluster
+- name: ISTAG
+  description: "Docker Image to deploy"
+  value: docker.repo1.uhc.com/rabbitmq:3.8-management
+- name: ERLANG_COOKIE
+  description: "Cookie used for authentication of cluster nodes"
+  value: "jCxra4h"
+- name: SERVICE_ACCOUNT
+  description: "Name of the service account used by RabbitMQ k8s plugin"
+  value: rabbitmq-discovery
+- name: VOLUME_SIZE
+  description: "Size of the RabbitMQ data volume"
+  value: 10Gi
+- name: AMQP_SVC_NAME
+  description: hostname for amqp loadbalanced service
+  value: rabbitmq
+- name: BUILD_NUMBER
+  description: pass build number to force rolling deployment
+
+objects:
+
+# This service account is needed for rabbit_peer_discovery_k8s plugin to be able to discover
+# cluster nodes
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: ${SERVICE_ACCOUNT}
+
+- apiVersion: v1
+  kind: RoleBinding
+  metadata:
+    name: ${SERVICE_ACCOUNT}-view
+  roleRef:
+    kind: Role
+    name: view
+  subjects:
+  - kind: ServiceAccount
+    name: ${SERVICE_ACCOUNT}
+# Load balancing route for web ui
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      app: ${CLUSTER_NAME}
+      type: LoadBalancer
+    name: ${CLUSTER_NAME}-http
+  spec:
+    port:
+      targetPort: http
+    to:
+      kind: Service
+      name: ${CLUSTER_NAME}-balancer
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: v1
+  kind: Secret
+  stringData:
+    cookie: ${ERLANG_COOKIE}
+  metadata:
+    name: ${CLUSTER_NAME}-secret
+  type: Opaque
+#Configuration for RabbitMQ
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: ${CLUSTER_NAME}-config
+  data:
+    populate-conf.sh: |
+        #!/bin/sh
+        set -eu
+
+        cp -v  /rabbitmq-config/rabbitmq.conf ${RABBITMQ_CONFIG_FILE}
+        cp -v ${RABBITMQ_CONFIG_FILE} /etc/rabbitmq/rabbitmq.conf
+
+        cp -v  /rabbitmq-config/definitions.json ${DEF_CONFIG_FILE}
+        sed -i "s|RMQ_ADMIN_PWD|$RMQ_ADMIN_PWD|g" ${DEF_CONFIG_FILE}
+        sed -i "s|RMQ_USR_PWD|$RMQ_USR_PWD|g" ${DEF_CONFIG_FILE}
+        cp -v ${DEF_CONFIG_FILE} /etc/rabbitmq/definitions.json
+
+        cp -vf /rabbitmq-config/enabled_plugins /etc/rabbitmq/enabled_plugins
+
+    rabbitmq.conf: |
+        loopback_users.guest = false
+        auth_mechanisms.1 = PLAIN
+        auth_mechanisms.2 = AMQPLAIN
+        ## Clustering
+        cluster_formation.peer_discovery_backend = rabbit_peer_discovery_k8s
+        cluster_formation.k8s.host = kubernetes.default.svc.cluster.local
+        cluster_formation.k8s.address_type = hostname
+        cluster_formation.k8s.hostname_suffix = .${CLUSTER_NAME}.${NAMESPACE}.svc.cluster.local
+        cluster_formation.node_cleanup.interval = 10
+        cluster_formation.node_cleanup.only_log_warning = true
+        cluster_partition_handling = autoheal
+        ## queue master locator
+        queue_master_locator=min-masters
+        # set max memory available to MQ
+        vm_memory_high_watermark.absolute = 6GB
+        ## load definitions file
+        management.load_definitions = /etc/rabbitmq/definitions.json
+    enabled_plugins: |
+      [rabbitmq_management,rabbitmq_peer_discovery_k8s,rabbitmq_prometheus].
+    definitions.json: |
+      {
+      "users": [
+        {
+          "name": "data",
+          "password": "RMQ_USR_PWD",
+          "tags": ""
+        },
+        {
+          "name": "guest",
+          "password": "guest",
+          "tags": ""
+        },
+        {
+          "name": "admin",
+          "password": "RMQ_ADMIN_PWD",
+          "tags": "administrator"
+        }
+      ],
+      "vhosts":[
+          {"name":"/"}
+      ],
+      "policies":[
+          {"vhost":"/","name":"ha","pattern":"", "definition":{"ha-mode":"all","ha-sync-mode":"automatic","ha-sync-batch-size":256}}
+      ],
+      "permissions": [
+        {
+          "user": "guest",
+          "vhost": "/",
+          "configure": ".*",
+          "write": ".*",
+          "read": ".*"
+        },
+        {
+          "user": "data",
+          "vhost": "/",
+          "configure": ".*",
+          "write": ".*",
+          "read": ".*"
+        },
+        {
+          "user": "admin",
+          "vhost": "/",
+          "configure": ".*",
+          "write": ".*",
+          "read": ".*"
+        }
+      ],
+      "queues" : [{
+          "name" : "caller-details-service",
+          "vhost" : "/",
+          "durable" : true,
+          "auto_delete" : false,
+          "arguments" : {}
+        }
+      ]
+      }
+# HTTP Load balancer
+- kind: Service
+  apiVersion: v1
+  metadata:
+    name: ${CLUSTER_NAME}-balancer
+    labels:
+      app: ${CLUSTER_NAME}
+      type: LoadBalancer
+  spec:
+    ports:
+    - name: http
+      protocol: TCP
+      port: 15672
+      targetPort: 15672
+    type: LoadBalancer
+    selector:
+      app: ${CLUSTER_NAME}
+
+# Load balancer
+- kind: Service
+  apiVersion: v1
+  metadata:
+    name: ${AMQP_SVC_NAME}
+    labels:
+      app: ${CLUSTER_NAME}
+      type: LoadBalancer
+  spec:
+    ports:
+    - name: amqp
+      protocol: TCP
+      port: 5672
+      targetPort: 5672
+    type: LoadBalancer
+    selector:
+      app: ${CLUSTER_NAME}
+
+# Headless service that makes it possible to lookup individual rabbitmq nodes
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: ${CLUSTER_NAME}
+    labels:
+      app: ${CLUSTER_NAME}
+  spec:
+    selector:
+      app: ${CLUSTER_NAME}
+    clusterIP: None
+    ports:
+      - name: amqp
+        port: 5672
+        targetPort: 5672
+
+- apiVersion: apps/v1beta1
+  kind: StatefulSet
+  metadata:
+    name: ${CLUSTER_NAME}
+    labels:
+      app: ${CLUSTER_NAME}
+  spec:
+    serviceName: ${CLUSTER_NAME}
+    replicas: 3
+    updateStrategy:
+      type: RollingUpdate
+    selector:
+      matchLabels:
+        app: ${CLUSTER_NAME}
+    template:
+      metadata:
+        labels:
+          app: ${CLUSTER_NAME}
+        annotations:
+          prometheus.io/scrape: "true"
+          #prometheus.io/port: "15692"
+          prometheus.io/path: "/metrics"
+      spec:
+        serviceAccountName: ${SERVICE_ACCOUNT}
+        terminationGracePeriodSeconds: 30
+        containers:
+        - name: rabbitmq
+          command:
+          - sh
+          args:
+          - -c
+          - /rabbitmq-config/populate-conf.sh ; exec docker-entrypoint.sh  rabbitmq-server
+          image: ${ISTAG}
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: config-volume
+              mountPath: /rabbitmq-config
+            - name: storage
+              mountPath: /var/lib/rabbitmq
+            - mountPath: /var/log/rabbitmq
+              name: storage
+          ports:
+            - name: http
+              protocol: TCP
+              containerPort: 15672
+            - name: amqp
+              protocol: TCP
+              containerPort: 5672
+            - name: metrics
+              protocol: TCP
+              containerPort: 15692
+          resources:
+            requests:
+              memory: 500Mi
+              cpu: 500m
+            limits:
+              memory: 6Gi
+              cpu: '4'
+          livenessProbe:
+            exec:
+              command: ["rabbitmqctl", "status"]
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["rabbitmqctl", "status"]
+            initialDelaySeconds: 60
+            timeoutSeconds: 10
+          env:
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: ${CLUSTER_NAME}-secret
+                  key: cookie
+            - name: K8S_SERVICE_NAME
+              value: ${CLUSTER_NAME}
+            - name: BUILD_NUMBER
+              value: ${BUILD_NUMBER}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: RABBITMQ_NODENAME
+              value: "rabbit@$(POD_NAME).${CLUSTER_NAME}.$(POD_NAMESPACE).svc.cluster.local"
+            - name: RABBITMQ_CONFIG_FILE
+              value: /var/lib/rabbitmq/rabbitmq.conf
+            - name: DEF_CONFIG_FILE
+              value: /var/lib/rabbitmq/definitions.json
+            - name: RMQ_USR_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key:  RMQ_PASS
+            - name: RMQ_ADMIN_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key:  RMQ_ADMIN_PWD
+        volumes:
+        - name: config-volume
+          configMap:
+            name: ${CLUSTER_NAME}-config
+            defaultMode: 0777
+            items:
+            - key: rabbitmq.conf
+              path: rabbitmq.conf
+            - key: definitions.json
+              path: definitions.json
+            - key: enabled_plugins
+              path: enabled_plugins
+            - key: populate-conf.sh
+              path: populate-conf.sh
+    volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: ${VOLUME_SIZE}

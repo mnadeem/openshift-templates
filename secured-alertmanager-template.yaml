@@ -1,0 +1,227 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: alertmanager
+parameters:
+  - name: APP_NAME
+    description: "Value for app label."
+ 
+  - name: NAME_SPACE
+    description: "The name of the namespace (openshift project)"
+ 
+  - name: REPLICAS
+    description: "number of Alertmanager replicas"
+ 
+  - name: SESSION_SECRET
+    description: "Session Secret used by OAuth Proxy to encrypt the login cookie"
+ 
+objects:
+# session Secret is used by OAuth Proxy to encrypt the login cookie
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: alertmanager-proxy
+  stringData:
+    session_secret: "${SESSION_SECRET}"
+ 
+# The annotation would tell OpenShift how to send your users back to your application, upon successful login: look for a Route alertmanager
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: alertmanager
+    annotations:
+      serviceaccounts.openshift.io/oauth-redirectreference.alertmanager: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"alertmanager"}}'
+ 
+# service.alpha.openshift.io/serving-cert-secret-name annotation would generate a signed serving certificate/key pair into a secret in your namespace. alertmanager-tls is later used in the container
+- apiVersion: v1
+  kind: Service
+  name: alertmanager
+  metadata:
+    annotations:
+      prometheus.io/path: /metrics
+      prometheus.io/port: "9093"
+      prometheus.io/scheme: http
+      prometheus.io/scrape: "true"
+      service.alpha.openshift.io/serving-cert-secret-name: alertmanager-tls
+    labels:
+      app: ${APP_NAME}
+    name: alertmanager
+  spec:
+    ports:
+    - name: alertmanager-proxy
+      port: 443
+      protocol: TCP
+      targetPort: oauth-proxy
+    clusterIP: None
+    selector:
+      app: ${APP_NAME}
+ 
+# Create a fully end-to-end TLS connection to the alertmanager proxy
+- apiVersion: v1
+  kind: Route
+  metadata:
+    annotations:
+    labels:
+      app: ${APP_NAME}
+    name: alertmanager
+  spec:
+    port:
+      targetPort: alertmanager-proxy
+    to:
+      kind: Service
+      name: alertmanager
+      weight: 100
+    tls:
+      termination: Reencrypt
+      insecureEdgeTerminationPolicy: Redirect
+    wildcardPolicy: None
+ 
+- apiVersion: apps/v1beta1
+  kind: StatefulSet
+  metadata:
+    name: alertmanager
+  spec:
+    podManagementPolicy: Parallel
+    updateStrategy:  
+      type: RollingUpdate
+    selector:
+      matchLabels:
+        app: alertmanager
+    replicas: ${REPLICAS}
+    template:
+      metadata:
+        labels:
+          app: ${APP_NAME}
+      spec:
+        serviceAccountName: alertmanager
+        containers:
+          # Deploy Application behind an oauth proxy (as Side car)
+          - name: alertmanager-proxy
+            image: openshift/oauth-proxy:v1.1.0
+            imagePullPolicy: IfNotPresent
+            ports:
+            - name: oauth-proxy
+              containerPort: 10443
+              protocol: TCP
+            args:
+              - -provider=openshift
+              - -https-address=:10443
+              - -http-address=
+              - -email-domain=*
+              - -upstream=http://localhost:9093
+              - -openshift-ca=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              - -tls-cert=/etc/tls/private/tls.crt
+              - -tls-key=/etc/tls/private/tls.key
+              - -client-id=system:serviceaccount:${NAME_SPACE}:${APP_NAME}
+              - -client-secret-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+              - -cookie-secret-file=/etc/proxy/secrets/session_secret
+              - '-openshift-sar={"resource": "namespaces", "verb": "get", "resourceName": "${NAME_SPACE}", "namespace": "${NAME_SPACE}"}'
+              - -skip-auth-regex=^/metrics
+            volumeMounts:
+              - mountPath: /etc/tls/private
+                name: alertmanager-tls-secret
+              - mountPath: /etc/proxy/secrets
+                name: alertmanager-proxy-secret
+          - name: alertmanager
+            args:
+              - --storage.path=/alertmanager/data/
+              - --config.file=/etc/alertmanager/alertmanager.yml
+            image: prom/alertmanager:v0.21.0
+            resources:
+              limits:
+                cpu: "500m"
+                memory: "128Mi"
+              requests:
+                cpu: "250m"
+                memory: "64Mi"
+            ports:
+            - name: alert-port
+              containerPort: 9093
+            - name: cluster-port
+              containerPort: 9094
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /-/ready
+                port: 9093
+                scheme: HTTP
+              initialDelaySeconds: 60
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /-/healthy
+                port: 9093
+                scheme: HTTP
+              initialDelaySeconds: 60
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            volumeMounts:
+              - mountPath: /alertmanager/data/
+                name: alertmanager-data-dir
+              - mountPath: /etc/alertmanager
+                name: alertmanager-config-dir
+        volumes:
+          - name: alertmanager-tls-secret
+            secret:
+              secretName: alertmanager-tls
+          - name: alertmanager-proxy-secret
+            secret:
+              secretName: alertmanager-proxy
+          - emptyDir: {}
+            name: alertmanager-data-dir
+          - configMap:
+              defaultMode: 420
+              items:
+              - key: alertYaml
+                path: alertmanager.yml
+              name: alertmanager-config-map
+            name: alertmanager-config-dir
+ 
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: alertmanager-config-map
+  data:
+      alertYaml: |-
+        ---
+        global:
+          # The smarthost and SMTP sender used for mail notifications.
+          smtp_smarthost: 'mailo2.org.com:25'
+          smtp_from: 'no_reply@org.com'
+          smtp_require_tls: False
+        # The root route on which each incoming alert enters.
+        route:
+          # The labels by which incoming alerts are grouped together. For example,
+          # multiple alerts coming in for cluster=A and alertname=LatencyHigh would
+          # be batched into a single group.
+          group_by: ['alertname', 'cluster', 'service']
+          # When a new group of alerts is created by an incoming alert, wait at
+          # least 'group_wait' to send the initial notification.
+          # This way ensures that you get multiple alerts for the same group that start
+          # firing shortly after another are batched together on the first
+          # notification.
+          group_wait: 30s
+          # When the first notification was sent, wait 'group_interval' to send a batch
+          # of new alerts that started firing for that group.
+          group_interval: 5m
+          # If an alert has successfully been sent, wait 'repeat_interval' to
+          # resend them.
+          repeat_interval: 1h
+ 
+          # The root route must not have any matchers as it is the entry point for
+          # all alerts. It needs to have a receiver configured so alerts that do not
+          # match any of the sub-routes are sent to someone.
+          # severity page - will only send email to apps team
+          # severity alert - will send email and pager duty notifications to apps team
+          # severity notification - will send email notification to pep team
+          # severity warning - will send email and pager duty notification to pep team
+          receiver: 'email-notification'
+ 
+        receivers:
+        - name: 'email-notification'
+          email_configs:
+            - to: 'Team_DL@org.com'

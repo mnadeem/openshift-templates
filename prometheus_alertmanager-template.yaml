@@ -1,0 +1,311 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: prometheus
+  annotations:
+    "openshift.io/display-name": Prometheus
+    description: |
+      A monitoring solution for an OpenShift cluster - collect and gather metrics and alerts from nodes, services, and the infrastructure. This is a tech preview feature.
+    iconClass: fa fa-cogs
+    tags: "monitoring, prometheus, alertmanager, time-series"
+ 
+parameters:
+  - name: APP_NAME
+    description: "Value for app label."
+ 
+  - name: NAME_SPACE
+    description: "The name of the namespace (Openshift project)"
+ 
+objects:
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+ 
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: prometheus
+  rules:
+    - apiGroups:
+      - ''
+      resources:
+        - services
+        - endpoints
+        - pods
+      verbs:
+        - get
+        - list
+        - watch
+ 
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: prometheus
+  roleRef:
+    name: prometheus
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+  subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+ 
+# Create a fully end-to-end TLS connection to the prometheus proxy
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  spec:
+    port:
+      targetPort: prometheus
+    to:
+      kind: Service
+      name: prometheus
+      weight: 100
+    tls:
+      termination: edge
+    wildcardPolicy: None
+ 
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/scheme: https
+    labels:
+      name: prometheus
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: prometheus
+      port: 9090
+      protocol: TCP
+      targetPort: prometheus-port
+    selector:
+      app: prometheus
+ 
+# Create a fully end-to-end TLS connection to the alertmanager proxy
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: alertmanager
+    namespace: "${NAME_SPACE}"
+  spec:
+    port:
+      targetPort: alertmanager
+    to:
+      kind: Service
+      name: alertmanager
+      weight: 100
+    tls:
+      termination: edge
+    wildcardPolicy: None
+ 
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+    labels:
+      name: alertmanager
+    name: alertmanager
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: alertmanager
+      port: 9093
+      protocol: TCP
+      targetPort: alert-port
+    selector:
+      app: prometheus
+ 
+- apiVersion: apps/v1beta1
+  kind: StatefulSet
+  metadata:
+    labels:
+      app: prometheus
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  spec:
+    updateStrategy:
+      type: RollingUpdate
+    podManagementPolicy: Parallel
+    selector:
+      matchLabels:
+        app: prometheus
+    template:
+      metadata:
+        labels:
+          app: prometheus
+        name: prometheus
+      spec:
+        serviceAccountName: prometheus
+        containers:
+ 
+        - name: prometheus
+          args:
+            - --storage.tsdb.retention=30d
+            - --storage.tsdb.min-block-duration=2m
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --web.enable-lifecycle
+          image: prom/prometheus:v2.23.0
+          imagePullPolicy: IfNotPresent
+          ports:
+          - name: prometheus-port
+            containerPort: 9090          
+          volumeMounts:
+          - mountPath: /etc/prometheus
+            name: prometheus-config
+          - mountPath: /prometheus
+            name: prometheus-data
+ 
+        - name: alertmanager
+          args:
+            - --storage.path=/alertmanager/data/
+            - --config.file=/etc/alertmanager/alertmanager.yml
+          image: prom/alertmanager:v0.21.0
+          imagePullPolicy: IfNotPresent
+          ports:
+          - name: alert-port
+            containerPort: 9093
+          - name: cluster-port
+            containerPort: 9094        
+          volumeMounts:
+            - mountPath: /etc/alertmanager
+              name: alertmanager-config
+            - mountPath: /alertmanager/data/
+              name: alertmanager-data
+ 
+        restartPolicy: Always
+        # Make sure alertmanager-data and prometheus-data pvc are created before
+        volumes:
+          - name: prometheus-data
+            persistentVolumeClaim:
+              claimName: prometheus-data
+          - name: alertmanager-data
+            persistentVolumeClaim:
+              claimName: alertmanager-data
+          - name: prometheus-config
+            configMap:
+              defaultMode: 420
+              name: prometheus
+ 
+          - name: alertmanager-config
+            configMap:
+              defaultMode: 420
+              name: alertmanager
+ 
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: prometheus
+    namespace: "${NAME_SPACE}"
+  data:
+    alerting.rules: |
+      groups:
+      - name: example-rules
+        interval: 30s # defaults to global interval
+        rules:
+        - alert: Pod Down
+          expr: up{job="kubernetes-pods"} == 0
+          annotations:
+            miqTarget: "ContainerNode"
+            severity: "HIGH"
+            message: "{{$labels.instance}} is down"
+    recording.rules: |
+      groups:
+      - name: aggregate_container_resources
+        rules:
+        - record: container_cpu_usage_rate
+          expr: sum without (cpu) (rate(container_cpu_usage_seconds_total[5m]))
+        - record: container_memory_rss_by_type
+          expr: container_memory_rss{id=~"/|/system.slice|/kubepods.slice"} > 0
+        - record: container_cpu_usage_percent_by_host
+          expr: sum(rate(container_cpu_usage_seconds_total{id="/"}[5m])) BY(kubernetes_io_hostname) / ON(kubernetes_io_hostname) machine_cpu_cores
+        - record: apiserver_request_count_rate_by_resources
+          expr: sum without (client,instance,contentType) (rate(apiserver_request_count[5m]))
+    prometheus.yml: |
+      rule_files:
+        - '*.rules'
+      scrape_configs: 
+      # Scrape config for the pods in ${NAME_SPACE} namespace
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - ${NAME_SPACE}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: kubernetes_pod_name
+      alerting:
+        alertmanagers:
+        - scheme: http
+          static_configs:
+          - targets:
+            - "localhost:9093"
+ 
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: alertmanager
+    namespace: "${NAME_SPACE}"
+  data:
+    alertmanager.yml: |
+      global:
+          # The smarthost and SMTP sender used for mail notifications.
+          smtp_smarthost: 'mail.org.com:25'
+          smtp_from: 'no_reply@org.com'
+          smtp_require_tls: false
+      route:
+          # The labels by which incoming alerts are grouped together. For example,
+          # multiple alerts coming in for cluster=A and alertname=LatencyHigh would
+          # be batched into a single group.
+          group_by: ['alertname', 'cluster', 'service']
+          # When a new group of alerts is created by an incoming alert, wait at
+          # least 'group_wait' to send the initial notification.
+          # This way ensures that you get multiple alerts for the same group that start
+          # firing shortly after another are batched together on the first
+          # notification.
+          group_wait: 30s
+          # When the first notification was sent, wait 'group_interval' to send a batch
+          # of new alerts that started firing for that group.
+          group_interval: 5m
+          # If an alert has successfully been sent, wait 'repeat_interval' to
+          # resend them.
+          repeat_interval: 1h
+ 
+          # The root route must not have any matchers as it is the entry point for
+          # all alerts. It needs to have a receiver configured so alerts that do not
+          # match any of the sub-routes are sent to someone.
+          # severity page - will only send email to apps team
+          # severity alert - will send email and pager duty notifications to apps team
+          # severity notification - will send email notification to pep team
+          # severity warning - will send email and pager duty notification to pep team
+          receiver: 'email-notification'
+ 
+      receivers:
+        - name: 'email-notification'
+          email_configs:
+            - to: 'abc@org.com'
