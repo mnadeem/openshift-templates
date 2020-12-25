@@ -1,2 +1,3 @@
 # openshift-templates
-Various Openshift Templates
+
+Various Openshift Templates 
