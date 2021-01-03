@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: Loki
+  annotations:
+    "openshift.io/display-name": Loki
+    description: |
+      A Logging solution for an OpenShift cluster.
+    iconClass: fa fa-cogs
+    tags: "logging, Loki, time-series"
+ 
+parameters:
+  - name: APP_NAME
+    description: "Value for app label."
+ 
+  - name: NAME_SPACE
+    description: "The name of the namespace (Openshift project)"
+  - name: REPLICAS
+    description: "number of replicas"
+    value: "1"
+ 
+objects:
+ 
+- apiVersion: apps/v1beta1
+  kind: StatefulSet
+  metadata:
+    labels:
+      app: "${APP_NAME}"
+    name: "${APP_NAME}"
+    namespace: "${NAME_SPACE}"
+  spec:
+    replicas: ${REPLICAS}
+    updateStrategy:
+      type: RollingUpdate
+    podManagementPolicy: Parallel
+    selector:
+      matchLabels:
+        app: "${APP_NAME}"
+    template:
+      metadata:
+        labels:
+          app: "${APP_NAME}"
+        annotations:
+          prometheus.io/scrape: "true"
+        name: "${APP_NAME}"
+      spec:
+ 
+        containers:
+        - name: loki
+          image: grafana/loki:2.1.0
+          args:
+            - "-config.file=/etc/loki/loki.yaml"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-port
+              containerPort: 3100
+              protocol: TCP
+            - name: metrics
+              containerPort: 3100
+              protocol: TCP
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /ready
+              port: http-port
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /ready
+              port: http-port
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+ 
+          volumeMounts:
+          - name: loki-config
+            mountPath: /etc/loki
+          - name: loki-data
+            mountPath: /data
+ 
+        restartPolicy: Always
+ 
+        volumes:
+          - name: loki-config
+            secret:
+              secretName: app-secret
+              items:
+                - key: loki.yaml
+                  path: loki.yaml
+ 
+    volumeClaimTemplates:
+    - metadata:
+        name: loki-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 10Gi
+ 
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      name: "${APP_NAME}"
+    name: "${APP_NAME}"
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: loki
+      port: 3100
+      protocol: TCP
+      targetPort: http-port
+    selector:
+      app: "${APP_NAME}"
+ 
+ 
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: loki
+    namespace: "${NAME_SPACE}"
+  spec:
+    port:
+      targetPort: loki
+    to:
+      kind: Service
+      name: "${APP_NAME}"
+      weight: 100
+    wildcardPolicy: None
