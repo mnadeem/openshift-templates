@@ -107,6 +107,10 @@ objects:
         labels:
           app: prometheus
         name: prometheus
+        annotations:
+          prometheus.io/scrape: "true"
+          #prometheus.io/port: "9090"
+          prometheus.io/path: "/metrics"        
       spec:
         serviceAccountName: prometheus
         containers:
@@ -159,6 +163,19 @@ objects:
           - name: prometheus-config
             mountPath: /etc/prometheus
             readOnly: true
+        - name: volume-exporter
+          image:  mnadeem/volume_exporter
+          imagePullPolicy: "Always"
+          args:
+            - --volume-dir=prometheus:/prometheus
+          ports:
+          - name: metrics-volume
+            containerPort: 9888
+          volumeMounts:
+          - mountPath: /prometheus
+            name: prometheus-data
+            readOnly: true            
+        
         restartPolicy: Always
 
         volumes:
@@ -171,7 +188,7 @@ objects:
     - metadata:
         name: prometheus-data
       spec:
-        accessModes: [ "ReadWriteMany" ]
+        accessModes: [ "ReadWriteOnce" ]
         resources:
           requests:
             storage: 15Gi
@@ -199,16 +216,16 @@ objects:
       - name: Prometheus
         interval: 30s # defaults to global interval
         rules:
-        - alert: PrometheusJobMissing
-          expr: absent(up{job="prometheus"})
-          for: 5m
-          labels:
-            severity: critical
-            service: prometheus
-            scope: monitoring
-          annotations:
-            summary: Prometheus job missing (instance {{ $labels.instance }})
-            description: A Prometheus job has disappeared
+        #- alert: PrometheusJobMissing
+        #  expr: absent(up{job="prometheus"})
+        #  for: 5m
+        #  labels:
+        #    severity: critical
+        #    service: prometheus
+        #    scope: monitoring
+        #  annotations:
+        #    summary: Prometheus job missing (instance {{ $labels.instance }})
+        #    description: A Prometheus job has disappeared
 
         - alert: PrometheusAllTargetsMissing
           expr: count (up) by (job) == 0
