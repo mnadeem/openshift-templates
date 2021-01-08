@@ -272,7 +272,18 @@ objects:
             scope: infrastructure
           annotations:
             summary: "Process CPU for {{ $labels.job }} is above 80%"
-        
+
+        - alert: VolumeUsage
+          expr: volume_percentage_used > 90
+          for: 5m
+          labels:
+            severity: warning
+            service: okd
+            scope: infrastructure
+          annotations:
+            title: High volume usage {{ $value }}
+            description: Volume running out (> 90%)
+
         - alert: FailedHttpRequestsFromApplication
           expr: sum by (kubernetes_pod_name, clientName, method, uri, status, outcome) (rate(http_client_requests_seconds_count{status!~"^[2-3][0-9][0-9]$"}[5m]))
           for: 5m
