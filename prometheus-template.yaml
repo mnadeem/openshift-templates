@@ -110,7 +110,7 @@ objects:
         annotations:
           prometheus.io/scrape: "true"
           #prometheus.io/port: "9090"
-          prometheus.io/path: "/metrics"        
+          prometheus.io/path: "/metrics"
       spec:
         serviceAccountName: prometheus
         containers:
@@ -121,11 +121,13 @@ objects:
             - --storage.tsdb.min-block-duration=2m
             - --config.file=/etc/prometheus/prometheus.yml
             - --web.enable-lifecycle
-            - --web.external-url=https://prometheus-demo-app.org.com
+            - --web.external-url=https://prometheus-ani-map-uhc-dev-new.origin-ctc-core-nonprod.optum.com
           image: prom/prometheus:v2.23.0
           imagePullPolicy: IfNotPresent
           ports:
           - name: prometheus-port
+            containerPort: 9090
+          - name: metrics-prom
             containerPort: 9090
           livenessProbe:
             failureThreshold: 3
@@ -159,6 +161,9 @@ objects:
           args:
             - --volume-dir=/etc/prometheus
             - --webhook-url=http://localhost:9090/-/reload
+          ports:
+          - name: metrics-reload
+            containerPort: 9533
           volumeMounts:
           - name: prometheus-config
             mountPath: /etc/prometheus
@@ -168,21 +173,26 @@ objects:
           imagePullPolicy: "Always"
           args:
             - --volume-dir=prometheus:/prometheus
+            - --volume-dir=appLog:/app/log
           ports:
           - name: metrics-volume
             containerPort: 9888
           volumeMounts:
-          - mountPath: /prometheus
-            name: prometheus-data
-            readOnly: true            
-        
+          - name: prometheus-data
+            mountPath: /prometheus
+            readOnly: true
+          - name: log-data-volume
+            mountPath: /app/log
+            readOnly: true
         restartPolicy: Always
-
         volumes:
           - name: prometheus-config
             configMap:
               defaultMode: 420
               name: prometheus
+          - name: log-data-volume
+            persistentVolumeClaim:
+              claimName: log-data
 
     volumeClaimTemplates:
     - metadata:
