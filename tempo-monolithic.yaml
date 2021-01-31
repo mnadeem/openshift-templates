@@ -271,7 +271,7 @@ objects:
     namespace: "${NAME_SPACE}"
   spec:
     host: app-trace.org.com
-    path: /http
+    path: /
     port:
       targetPort: http
     to:
