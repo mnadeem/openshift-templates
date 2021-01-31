@@ -8,7 +8,7 @@ metadata:
       A Tracing solution for an OpenShift cluster.
     iconClass: fa fa-cogs
     tags: "Tracing, Tempo, time-series"
- 
+
 parameters:
   - name: TEMP_QUERY_IMAGE
     description: "Tempo query docker image name"
@@ -19,9 +19,9 @@ parameters:
   - name: REPLICAS
     description: "number of replicas"
     value: "1"
- 
+
 objects:
- 
+
 - apiVersion: apps.openshift.io/v1
   kind: DeploymentConfig
   metadata:
@@ -45,13 +45,27 @@ objects:
       spec:
         containers:
           - name: tempo
-            image: grafana/tempo:latest
+            image: grafana/tempo:0.5.0
             imagePullPolicy: "Always"
             args:
               - -config.file=/etc/tempo/tempo.yaml
             ports:
               - name: metrics
                 containerPort: 3100
+              - name: http
+                containerPort: 3100
+              - name: ot
+                containerPort: 55680
+              - name: tc
+                containerPort: 6831
+              - name: tb
+                containerPort: 6832
+              - name: th
+                containerPort: 14268
+              - name: tg
+                containerPort: 14250
+              - name: zipkin
+                containerPort: 9411
             livenessProbe:
               failureThreshold: 3
               httpGet:
@@ -82,7 +96,7 @@ objects:
               items:
                 - key: tempo.yaml
                   path: tempo.yaml
- 
+
 - apiVersion: apps.openshift.io/v1
   kind: DeploymentConfig
   metadata:
@@ -140,7 +154,7 @@ objects:
   data:
       tempo-query.yaml: |-
         backend: "tempo:3100"
- 
+
 - apiVersion: v1
   kind: Service
   metadata:
@@ -156,7 +170,7 @@ objects:
       targetPort: http
     selector:
       app: tempo-query
- 
+
 - apiVersion: v1
   kind: Service
   metadata:
@@ -166,23 +180,84 @@ objects:
     namespace: "${NAME_SPACE}"
   spec:
     ports:
-    - name: tempo
+    - name: http
       port: 3100
       protocol: TCP
-      targetPort: metrics
+      targetPort: http
+    - name: ot
+      port: 55680
+      protocol: TCP
+      targetPort: ot
+    - name: tc
+      port: 6831
+      protocol: TCP
+      targetPort: tc
+    - name: tb
+      port: 6832
+      protocol: TCP
+      targetPort: tb
+    - name: th
+      port: 14268
+      protocol: TCP
+      targetPort: th
+    - name: tg
+      port: 14250
+      protocol: TCP
+      targetPort: tg
+    - name: zipkin
+      port: 9411
+      protocol: TCP
+      targetPort: zipkin
     selector:
       app: tempo
- 
+
 - apiVersion: route.openshift.io/v1
   kind: Route
   metadata:
     name: tempo-query
     namespace: "${NAME_SPACE}"
   spec:
+    host: app-trace-fr.org.com
     port:
       targetPort: tempo-query
     to:
       kind: Service
       name: tempo-query
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-open-telemetry
+    namespace: "${NAME_SPACE}"
+  spec:
+    host: app-trace.org.com
+    path: /ot
+    port:
+      targetPort: ot
+    to:
+      kind: Service
+      name: tempo
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-zipkin
+    namespace: "${NAME_SPACE}"
+  spec:
+    host: app-trace.org.com
+    path: /zipkin
+    port:
+      targetPort: zipkin
+    to:
+      kind: Service
+      name: tempo
       weight: 100
     wildcardPolicy: None
