@@ -261,3 +261,93 @@ objects:
       name: tempo
       weight: 100
     wildcardPolicy: None
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-http
+    namespace: "${NAME_SPACE}"
+  spec:
+    host: app-trace.org.com
+    path: /http
+    port:
+      targetPort: http
+    to:
+      kind: Service
+      name: tempo
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-tc
+    namespace: "${NAME_SPACE}"
+  spec:
+    host: app-trace.org.com
+    path: /tc
+    port:
+      targetPort: tc
+    to:
+      kind: Service
+      name: tempo
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-tb
+    namespace: "${NAME_SPACE}"
+  spec:
+    host: app-trace.org.com
+    path: /tb
+    port:
+      targetPort: tb
+    to:
+      kind: Service
+      name: tempo
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-th
+    namespace: "${NAME_SPACE}"
+  spec:
+    host: app-trace.org.com
+    path: /th
+    port:
+      targetPort: th
+    to:
+      kind: Service
+      name: tempo
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-tg
+    namespace: "${NAME_SPACE}"
+  spec:
+    host: app-trace.org.com
+    path: /tg
+    port:
+      targetPort: tg
+    to:
+      kind: Service
+      name: tempo
+      weight: 100
+    wildcardPolicy: None
