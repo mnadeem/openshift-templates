@@ -184,6 +184,22 @@ objects:
       port: 3100
       protocol: TCP
       targetPort: http
+    - name: zipkin
+      port: 9411
+      protocol: TCP
+      targetPort: zipkin
+    selector:
+      app: tempo
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      name: tempo
+    name: tempo-egress
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
     - name: ot
       port: 55680
       protocol: TCP
@@ -204,10 +220,8 @@ objects:
       port: 14250
       protocol: TCP
       targetPort: tg
-    - name: zipkin
-      port: 9411
-      protocol: TCP
-      targetPort: zipkin
+    loadBalancerIP:
+    type: LoadBalancer 
     selector:
       app: tempo
 
