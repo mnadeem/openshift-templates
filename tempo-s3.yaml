@@ -1,8 +1,10 @@
-auth_enabled: true
- 
+auth_enabled: false
+
 server:
   http_listen_port: 3100
- 
+  grpc_server_max_recv_msg_size: 10485760
+  grpc_server_max_send_msg_size: 10485760
+
 distributor:
   receivers:                           # this configuration will listen on all ports and protocols that tempo is capable of.
     jaeger:                            # the receives all come from the OpenTelemetry collector.  more configuration information can
@@ -17,33 +19,39 @@ distributor:
         http:
         grpc:
     opencensus:
- 
+
 ingester:
   trace_idle_period: 10s               # the length of time after a trace has not received spans to consider it complete and flush it
-  #max_block_bytes: 100                # cut the head block when it his this number of traces or ...
-  traces_per_block: 100
+  max_block_bytes: 100                 # cut the head block when it his this number of traces or ...
+  #traces_per_block: 100
   max_block_duration: 5m               #   this much time passes
- 
+
+querier:
+  frontend_worker:
+    frontend_address: 127.0.0.1:9095
+
 compactor:
   compaction:
     compaction_window: 1h              # blocks in this time window will be compacted together
     max_compaction_objects: 1000000    # maximum size of compacted blocks
-    block_retention: 1h
+    block_retention: 336h
     compacted_block_retention: 10m
     flush_size_bytes: 5242880
- 
+
 storage:
   trace:
     backend: s3                        # backend configuration to use
-    wal:
-      path: /tmp/tempo/wal             # where to store the the wal locally
+    block:
       bloom_filter_false_positive: .05 # bloom filter false positive rate.  lower values create larger filters but fewer false positives
       index_downsample: 10             # number of traces per index record
+      encoding: lz4-64k                # block encoding/compression.  options: none, gzip, lz4-64k, lz4-256k, lz4-1M, lz4, snappy, zstd
+    wal:
+      path: /tmp/tempo/wal             # where to store the the wal locally
     s3:
-      endpoint: <S3 endpoint>
+      endpoint: <s3-endpoint>
       bucket: tempo                    # how to store data in s3
-      access_key: <Access key>
-      secret_key: <Secret Key>
+      access_key: <access_key>
+      secret_key: <secret_key>
       insecure: false
     pool:
       max_workers: 100                 # the worker pool mainly drives querying, but is also used for polling the blocklist
