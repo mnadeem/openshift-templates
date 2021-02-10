@@ -1,0 +1,260 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: Tempo
+  annotations:
+    "openshift.io/display-name": Tempo
+    description: |
+      A Tracing solution for an OpenShift cluster.
+    iconClass: fa fa-cogs
+    tags: "Tracing, Tempo, time-series"
+
+parameters:
+  - name: TEMP_QUERY_IMAGE
+    description: "Tempo query docker image name"
+  - name: APP_NAME
+    description: "Value for app label."
+  - name: NAME_SPACE
+    description: "The name of the namespace (Openshift project)"
+  - name: REPLICAS
+    description: "number of replicas"
+    value: "1"
+  - name: VOLUME_CAPACITY
+    displayName: Volume Capacity
+    description: Volume space available for wal, e.g. 512Mi, 2Gi.
+    value: 1Gi
+    required: true
+
+objects:
+
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: tempo-wal-pvc
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "${VOLUME_CAPACITY}"
+    storageClassName: nas-thin
+
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      app: tempo
+    name: tempo
+    namespace: "${NAME_SPACE}"
+  spec:
+    replicas: "${{REPLICAS}}"
+    selector:
+      app: tempo
+    template:
+      metadata:
+        labels:
+          app: tempo
+        name: tempo
+        annotations:
+          prometheus.io/scrape: "true"
+          #prometheus.io/port: "3100"
+          prometheus.io/path: "/metrics"
+      spec:
+        containers:
+          - name: tempo
+            image: grafana/tempo:latest
+            imagePullPolicy: "Always"
+            args:
+              - -config.file=/etc/tempo/tempo.yaml
+            ports:
+              - name: metrics
+                containerPort: 3100
+              - name: http
+                containerPort: 3100
+              - name: ot
+                containerPort: 55680
+              - name: tc
+                containerPort: 6831
+              - name: tb
+                containerPort: 6832
+              - name: th
+                containerPort: 14268
+              - name: tg
+                containerPort: 14250
+              - name: zipkin
+                containerPort: 9411
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /ready
+                port: metrics
+                scheme: HTTP
+              initialDelaySeconds: 60
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /ready
+                port: metrics
+                scheme: HTTP
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            volumeMounts:
+              - name: tempo-config
+                mountPath: /etc/tempo
+              - name: tempo-wal-volume
+                mountPath: /tmp/tempo/wal
+          - name: volume-exporter
+            image:  mnadeem/volume_exporter
+            imagePullPolicy: "Always"
+            args:
+              - --volume-dir=tempo-wal:/tmp/tempo/wal
+            ports:
+            - name: metrics-volume
+              containerPort: 9888
+            volumeMounts:
+            - mountPath: /tmp/tempo/wal
+              name: tempo-wal-volume
+              readOnly: true
+        volumes:
+          - name: tempo-config
+            secret:
+              secretName: tempo-secret
+              items:
+                - key: tempo.yaml
+                  path: tempo.yaml
+          - name: tempo-wal-volume
+            persistentVolumeClaim:
+              claimName: tempo-wal-pvc
+
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      app: tempo-query
+    name: tempo-query
+    namespace: "${NAME_SPACE}"
+  spec:
+    replicas: "${{REPLICAS}}"
+    selector:
+      app: tempo-query
+    template:
+      metadata:
+        labels:
+          app: tempo-query
+        name: tempo-query
+      spec:
+        containers:
+          - name: tempo-query
+            image: ${TEMP_QUERY_IMAGE}
+            imagePullPolicy: "Always"
+            args:
+              - --grpc-storage-plugin.configuration-file=/etc/tempo/tempo-query.yaml
+            ports:
+              - name: http
+                containerPort: 16686
+            livenessProbe:
+              failureThreshold: 3
+              tcpSocket:
+                port: http # named port
+              initialDelaySeconds: 60
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            readinessProbe:
+              failureThreshold: 3
+              tcpSocket:
+                port: http # named port
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            volumeMounts:
+              - name: tempo-query-config-vol
+                mountPath: /etc/tempo
+        volumes:
+          - name: tempo-query-config-vol
+            configMap:
+              defaultMode: 420
+              name: tempo-query-config
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: tempo-query-config
+  data:
+      tempo-query.yaml: |-
+        backend: "tempo:3100"
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      name: tempo-query
+    name: tempo-query
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: tempo-query
+      port: 16686
+      protocol: TCP
+      targetPort: http
+    selector:
+      app: tempo-query
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      name: tempo
+    name: tempo
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: http
+      port: 3100
+      protocol: TCP
+      targetPort: http
+    - name: zipkin
+      port: 9411
+      protocol: TCP
+      targetPort: zipkin
+    - name: ot
+      port: 55680
+      protocol: TCP
+      targetPort: ot
+    - name: tc
+      port: 6831
+      protocol: TCP
+      targetPort: tc
+    - name: tb
+      port: 6832
+      protocol: TCP
+      targetPort: tb
+    - name: th
+      port: 14268
+      protocol: TCP
+      targetPort: th
+    - name: tg
+      port: 14250
+      protocol: TCP
+      targetPort: tg
+    selector:
+      app: tempo
+
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: tempo-query
+    namespace: "${NAME_SPACE}"
+  spec:
+    port:
+      targetPort: tempo-query
+    to:
+      kind: Service
+      name: tempo-query
+      weight: 100
+    wildcardPolicy: None
