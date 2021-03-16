@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: sql-exporter
+  annotations:
+    "openshift.io/display-name": Prometheus sql-exporter
+    description: |
+      A monitoring solution for an OpenShift cluster - collect and gather metrics and alerts from nodes, services, and the infrastructure. This is a tech preview feature.
+    iconClass: fa fa-cogs
+    tags: "monitoring, prometheus, sql-exporter, time-series"
+ 
+parameters:
+  - name: APP_NAME
+    description: "Value for app label."
+ 
+  - name: NAME_SPACE
+    description: "The name of the namespace (Openshift project)"
+ 
+objects:
+ 
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: ${APP_NAME}
+    namespace: "${NAME_SPACE}"
+  spec:
+    port:
+      host: app-sql-exporter.org.com
+      targetPort: ${APP_NAME}
+    to:
+      kind: Service
+      name: ${APP_NAME}
+      weight: 100
+    wildcardPolicy: None
+ 
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      name: ${APP_NAME}
+    name: ${APP_NAME}
+    namespace: "${NAME_SPACE}"
+  spec:
+    ports:
+    - name: ${APP_NAME}
+      port: 9399
+      protocol: TCP
+      targetPort: http-port
+    selector:
+      app: ${APP_NAME}
+ 
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    name: ${APP_NAME}
+    labels:
+      app: ${APP_NAME}
+  spec:
+    replicas: 1
+    selector:
+      deploymentconfig: ${APP_NAME}
+      app: ${APP_NAME}
+    template:
+      metadata:
+        labels:
+          deploymentconfig: ${APP_NAME}
+          app: ${APP_NAME}
+      spec:
+        containers:
+          - name: ${APP_NAME}
+            image: githubfree/sql_exporter:latest
+            ports:
+              - name: http-port
+                containerPort: 9399
+                protocol: TCP
+            args:
+              - "--config.file=/etc/sql-exporter/sql-exporter.yaml"
+            imagePullPolicy: IfNotPresent
+            livenessProbe:
+              tcpSocket:
+                port: http-port
+            readinessProbe:
+              tcpSocket:
+                port: http-port
+            volumeMounts:
+            - name: sql-exporter-vol
+              mountPath: /etc/sql-exporter/sql-exporter.yaml
+              subPath: sql-exporter.yaml
+              readOnly: true
+            - name: sql-collectors-vol
+              mountPath: /etc/sql-exporter/app.collector.yaml
+              subPath: app.collector.yaml
+              readOnly: true
+        volumes:
+          - name: sql-exporter-vol
+            secret:
+              secretName: sql-exporter-secret
+              items:
+                - key: sql-exporter.yaml
+                  path: sql-exporter.yaml
+          - name: sql-collectors-vol
+            configMap:
+              name: sql-exporter-collector-config
+ 
+    triggers:
+      - type: ConfigChange
+ 
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: sql-exporter-collector-config
+    namespace: "${NAME_SPACE}"
+  data:
+    app.collector.yaml: |
+      # This collector will be referenced in the exporter configuration as `app_one`.
+      collector_name: app_one
+ 
+      # A Prometheus metric with (optional) additional labels, value and labels populated from one query.
+      metrics:
+        - metric_name: app_metric_name
+          type: gauge
+          help: 'App Sample metrics'
+          static_labels:
+            # Arbitrary key/value pair
+            unit: app_one
+            env: dev
+          values: [AppMetrics]
+          query: |
+            select
+              count(*) as AppMetrics
+            from
+              dbo.metrics
+            where
+              porocessing not in ('done', 'na')
